@@ -1,0 +1,183 @@
+# streamlit_dashboard.py
+# Polished Streamlit Dashboard (Beginner-friendly)
+# Features: default repo CSV load, upload fallback, metrics, table, charts, export, About page.
+# Requirements: streamlit, pandas, altair
+
+import streamlit as st
+import pandas as pd
+import altair as alt
+from io import StringIO
+
+st.set_page_config(page_title="Bata Sales Dashboard", layout="wide", initial_sidebar_state="expanded")
+
+# ---------- Helper functions ----------
+@st.cache_data
+def load_csv_from_repo(filename: str):
+    try:
+        return pd.read_csv(filename)
+    except Exception:
+        return None
+
+def try_parse_number_series(df, col):
+    # attempt to coerce to numeric (safe)
+    try:
+        return pd.to_numeric(df[col], errors='coerce')
+    except Exception:
+        return None
+
+def nice_metrics(df):
+    # Simple metrics - adapt to your columns (if numeric exist)
+    numeric_cols = df.select_dtypes(include='number').columns.tolist()
+    metrics = {}
+    if not numeric_cols:
+        return metrics
+    # pick first numeric columns for sample metrics
+    c1 = numeric_cols[0]
+    metrics['Rows'] = len(df)
+    metrics[f"Avg {c1}"] = df[c1].mean()
+    if len(numeric_cols) > 1:
+        c2 = numeric_cols[1]
+        metrics[f"Sum {c2}"] = df[c2].sum()
+    return metrics
+
+def download_button_csv(df, name="export.csv"):
+    csv = df.to_csv(index=False)
+    st.download_button("Download CSV (current view)", data=csv, file_name=name, mime="text/csv")
+
+# ---------- UI: Header ----------
+st.markdown(
+    """
+    <style>
+    .stApp { background-color: #f7f9fc; }
+    .card { background: white; padding: 10px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+    </style>
+    """, unsafe_allow_html=True
+)
+
+st.title("Bata Sales — Dashboard")
+st.caption("Interactive dashboard: preview data, filter, chart, and download. Built with Streamlit.")
+
+# ---------- Sidebar Nav ----------
+page = st.sidebar.radio("Navigation", ("Home", "Data Explorer", "Visualizations", "About"))
+
+# Load CSV: default repo file name
+DEFAULT_CSV_NAME = "Bata Data.csv"
+
+uploaded_file = st.sidebar.file_uploader("Upload CSV (optional)", type=["csv"])
+use_repo = st.sidebar.checkbox(f"Load repo file: {DEFAULT_CSV_NAME}", value=not bool(uploaded_file))
+
+df = None
+if uploaded_file is not None:
+    try:
+        df = pd.read_csv(uploaded_file)
+        st.sidebar.success("Loaded uploaded CSV")
+    except Exception as e:
+        st.sidebar.error(f"Upload error: {e}")
+
+if df is None and use_repo:
+    df = load_csv_from_repo(DEFAULT_CSV_NAME)
+    if df is None:
+        st.sidebar.info(f"Repo CSV '{DEFAULT_CSV_NAME}' not found. Upload a CSV instead.")
+
+# ---------- Home ----------
+if page == "Home":
+    st.header("Overview")
+    if df is None:
+        st.info("No data available. Upload a CSV in the sidebar or add the repo CSV named 'Bata Data.csv'.")
+    else:
+        # Metrics row
+        metrics = nice_metrics(df)
+        cols = st.columns(len(metrics) or 1)
+        for i, (k, v) in enumerate(metrics.items()):
+            with cols[i]:
+                st.markdown(f"<div class='card'><h4 style='margin:0'>{k}</h4><h2 style='margin:0'>{v:.2f}</h2></div>", unsafe_allow_html=True)
+
+        st.markdown("### Quick preview")
+        st.dataframe(df.head(10), use_container_width=True)
+        download_button_csv(df)
+
+# ---------- Data Explorer ----------
+if page == "Data Explorer":
+    st.header("Data Explorer")
+    if df is None:
+        st.info("Upload or load the repo CSV to explore the data.")
+    else:
+        # Basic controls
+        st.markdown("**Controls**")
+        cols = df.columns.tolist()
+        search_col = st.selectbox("Search by column", options=cols)
+        query = st.text_input("Search text (filter rows containing text)", value="")
+        # optional column visibility
+        visible_cols = st.multiselect("Columns to show (leave empty to show all)", options=cols, default=cols[:8])
+
+        filtered = df.copy()
+        if query:
+            # filter rows where selected column contains query (case-insensitive)
+            filtered = filtered[filtered[search_col].astype(str).str.contains(query, case=False, na=False)]
+
+        if visible_cols:
+            display_df = filtered[visible_cols]
+        else:
+            display_df = filtered
+
+        st.write(f"Showing {len(display_df)} rows.")
+        st.dataframe(display_df, use_container_width=True, height=400)
+        download_button_csv(display_df, name="filtered_export.csv")
+
+# ---------- Visualizations ----------
+if page == "Visualizations":
+    st.header("Visualizations")
+    if df is None:
+        st.info("Upload or load the repo CSV to see visualizations.")
+    else:
+        cols = df.columns.tolist()
+        # choose x axis (prefer datetime-like or first column)
+        x_col = st.selectbox("X axis (choose a column)", options=cols, index=0)
+        numeric_cols = [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
+        y_cols = st.multiselect("Y series (choose numeric columns)", options=numeric_cols, default=numeric_cols[:2])
+
+        # if possible parse x as date
+        try:
+            parsed = pd.to_datetime(df[x_col], errors='coerce')
+            has_dates = parsed.notna().any()
+        except Exception:
+            has_dates = False
+
+        chart_df = df.copy()
+        if has_dates:
+            chart_df[x_col] = pd.to_datetime(chart_df[x_col], errors='coerce')
+
+        if not y_cols:
+            st.warning("No numeric columns selected. Please select at least one numeric column.")
+        else:
+            # build altair chart
+            base = alt.Chart(chart_df).encode(
+                x=alt.X(x_col, type='temporal' if has_dates else 'ordinal', axis=alt.Axis(title=x_col))
+            )
+            layers = []
+            for c in y_cols:
+                layers.append(base.mark_line(point=True).encode(
+                    y=alt.Y(c, type='quantitative', axis=alt.Axis(title=c)),
+                    tooltip=[x_col, c]
+                ))
+            chart = alt.layer(*layers).interactive().properties(height=450)
+            st.altair_chart(chart, use_container_width=True)
+            # download chart as PNG - Streamlit cannot natively export altair as PNG w/o extra packages,
+            # so provide a simple instruction
+            st.info("To save a chart image: right-click the chart and choose 'Save image as...' or use your OS screenshot tool.")
+
+# ---------- About ----------
+if page == "About":
+    st.header("About this Dashboard")
+    st.markdown("""
+    This dashboard visualizes the Bata dataset.  
+    **How to edit the About text:** Use QuillBot to polish your essay/description and paste the final text here.
+    """)
+    st.markdown("**Steps to generate a polished About/essay with QuillBot:**")
+    st.markdown("""
+    1. Open https://quillbot.com/ and paste your draft text.  
+    2. Choose 'Paraphrase' → Tone: Formal or Standard.  
+    3. Copy the paraphrased output and paste into this About section (edit the code or update this file on GitHub).
+    """)
+    st.markdown("---")
+    st.markdown("If you want me to add more content here, paste your draft essay below and I will suggest a QuillBot-ready prompt.")
